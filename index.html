@@ -1617,6 +1617,48 @@
       .daily-bar-lbl { font-size: 0.6rem; }
     }
 
+  
+    .stat-pill-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 0.78rem;
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.14s;
+    }
+    .stat-pill-btn:hover {
+      border-color: var(--primary);
+      background: var(--primary-soft);
+    }
+    .stat-pill-btn.active-filter {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: #ffffff !important;
+      font-weight: 700;
+    }
+    .stat-pill-btn.active-filter strong { color: #ffffff !important; }
+    .mcq-feedback {
+      margin-top: 8px;
+      padding: 7px 12px;
+      border-radius: 8px;
+      font-size: 0.84rem;
+      font-weight: 600;
+    }
+    .mcq-feedback.ok { background: var(--success-soft); color: var(--success); border: 1px solid #bbf7d0; }
+    .mcq-feedback.ng { background: var(--danger-soft); color: var(--danger); border: 1px solid #fecaca; }
+    .answer-input-label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      margin: 10px 0 4px;
+    }
+
   </style>
 </head>
 <body>
@@ -1715,8 +1757,8 @@
             <div class="toolbar-right">
               <button id="toggleAllAnswersBtn">👁️ 전체 해답 펼치기</button>
               <label class="check-label">
-                <input type="checkbox" id="showMemoToggle" />
-                <span>메모칸</span>
+                <input type="checkbox" id="showMemoToggle" checked />
+                <span>내 답안 입력칸</span>
               </label>
             </div>
           </div>
@@ -2147,6 +2189,13 @@
         return Promise.resolve(null);
       }
       return new Promise((resolve) => {
+        let settled = false;
+        const finish = (val) => {
+          if (settled) return;
+          settled = true;
+          resolve(val);
+        };
+        const timer = setTimeout(() => { useMemoryOnly = true; finish(null); }, 1500);
         try {
           const req = indexedDB.open(DB_NAME, DB_VERSION);
           req.onupgradeneeded = (e) => {
@@ -2155,11 +2204,13 @@
             if (!db.objectStoreNames.contains("progress")) db.createObjectStore("progress", { keyPath: "qid" });
             if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
           };
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => { useMemoryOnly = true; resolve(null); };
+          req.onsuccess = () => { clearTimeout(timer); finish(req.result); };
+          req.onerror = () => { clearTimeout(timer); useMemoryOnly = true; finish(null); };
+          req.onblocked = () => { clearTimeout(timer); useMemoryOnly = true; finish(null); };
         } catch {
+          clearTimeout(timer);
           useMemoryOnly = true;
-          resolve(null);
+          finish(null);
         }
       });
     }
@@ -2298,14 +2349,96 @@
       if (m1) {
         return { body: m1[1].trim(), options: [m1[2].trim(), m1[3].trim(), m1[4].trim(), m1[5].trim()] };
       }
+      const mBlank = str.match(/([\s\S]*?)(?:^|\n)1\s*\n2\s*\n3\s*\n4\s*$/);
+      if (mBlank) {
+        return {
+          body: mBlank[1].trim(),
+          options: ["1번 (그림/보기 참조)", "2번 (그림/보기 참조)", "3번 (그림/보기 참조)", "4번 (그림/보기 참조)"]
+        };
+      }
       const m2 = str.match(/([\s\S]*?)(?:^|\n)①\s*([\s\S]*?)\n②\s*([\s\S]*?)\n③\s*([\s\S]*?)\n④\s*([\s\S]*)$/);
       if (m2) {
         return { body: m2[1].trim(), options: [m2[2].trim(), m2[3].trim(), m2[4].trim(), m2[5].trim()] };
       }
+      const m3 = str.match(/([\s\S]*?)(?:^|\n)1[.)]\s+([\s\S]*?)\n2[.)]\s+([\s\S]*?)\n3[.)]\s+([\s\S]*?)\n4[.)]\s+([\s\S]*)$/);
+      if (m3) {
+        return { body: m3[1].trim(), options: [m3[2].trim(), m3[3].trim(), m3[4].trim(), m3[5].trim()] };
+      }
       return { body: str, options: [] };
     }
 
-    function isOptionCorrect(optText, oIdx, q) {
+    function isQuestionMcqStyle(q, topicType) {
+      if (topicType === "mcq") return true;
+      const parsed = parseMcqOptions(q.question, q.options);
+      if (parsed.options.length === 4 && /(것은\??|고르시오|선택하시오|해당하는\s*것|아닌\s*것|틀린\s*것|옳은\s*것)/.test(parsed.body)) {
+        return true;
+      }
+      return false;
+    }
+
+    function detectCorrectMcqIndex(options, q) {
+      if (!Array.isArray(options) || options.length < 2) return -1;
+      const nums = ["①", "②", "③", "④", "⑤"];
+      const ansRaw = String(q.answer || "").trim();
+      const fullBlob = `${ansRaw} ${q.explanation || ""}`;
+
+      // 1) Direct number/circled-number answer
+      for (let i = 0; i < options.length; i++) {
+        if (ansRaw === String(i + 1) || ansRaw === nums[i]) return i;
+      }
+      const explicitNum = fullBlob.match(/(?:정답(?:은|이|:|\s)*|보기\s*)([1-4①-④])(?:번)?(?:이|가|은|는)?\s*(?:정답|옳|해당|이다)?/);
+      if (explicitNum) {
+        const ch = explicitNum[1];
+        const idx = nums.indexOf(ch) >= 0 ? nums.indexOf(ch) : (Number(ch) - 1);
+        if (idx >= 0 && idx < options.length) return idx;
+      }
+      const numDirect = fullBlob.match(/([1-4])번(?:이|가|은|는)\s*(?:정답|옳|해당|아니다|틀|AND|OR)/);
+      if (numDirect) {
+        const idx = Number(numDirect[1]) - 1;
+        if (idx >= 0 && idx < options.length) return idx;
+      }
+
+      // 2) Score each option against the conclusion sentence vs full answer
+      const sentences = ansRaw.split(/(?<=[.!?다])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+      const primarySent = (sentences[0] || ansRaw).replace(/\s+/g, "").toLowerCase();
+      const allNorm = fullBlob.replace(/\s+/g, "").toLowerCase();
+
+      let bestIdx = -1;
+      let bestScore = 0;
+      options.forEach((opt, i) => {
+        const cleanOpt = String(opt || "").replace(/\s+/g, "").replace(/[.,·•()]/g, "").toLowerCase();
+        if (cleanOpt.length < 2) return;
+        let score = 0;
+        const pPos = primarySent.indexOf(cleanOpt);
+        if (pPos >= 0) {
+          score += 100 + Math.min(cleanOpt.length, 30);
+          // Favor matches near the end of the first sentence ("...은 특별점검이다.")
+          if (pPos > primarySent.length * 0.45) score += 25;
+        } else if (allNorm.includes(cleanOpt)) {
+          score += 30 + Math.min(cleanOpt.length, 20);
+        } else {
+          // Partial token overlap with primary sentence
+          const tokens = String(opt || "").split(/[\s,·/()]+/).filter(t => t.length >= 2);
+          let hit = 0;
+          tokens.forEach(t => { if (primarySent.includes(t.toLowerCase())) hit++; });
+          if (tokens.length > 0 && hit / tokens.length >= 0.5) {
+            score += Math.round((hit / tokens.length) * 60);
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      });
+      return bestScore > 0 ? bestIdx : -1;
+    }
+
+    function isOptionCorrect(optText, oIdx, q, allOptions = null) {
+      const opts = Array.isArray(allOptions) && allOptions.length >= 2
+        ? allOptions
+        : parseMcqOptions(q.question, q.options).options;
+      const detected = detectCorrectMcqIndex(opts, q);
+      if (detected >= 0) return oIdx === detected;
       const nums = ["①", "②", "③", "④", "⑤"];
       const ansBlob = `${q.answer || ""} ${q.explanation || ""}`.replace(/\s+/g, "");
       const cleanOpt = String(optText || "").replace(/\s+/g, "");
@@ -2594,7 +2727,7 @@
       statusFilter: "all",
       dedup: true,
       revealAll: false,
-      showMemo: false,
+      showMemo: true,
       page: 1,
       pageSize: 25,
       progress: {},
@@ -2838,28 +2971,51 @@
         return;
       }
 
-      const filtered = getFilteredQuestions();
+      // Compute counts before statusFilter so clicking 외움/애매/모름 pills stays interactive
+      const prevStatusFilter = state.statusFilter;
+      state.statusFilter = "all";
+      const baseFiltered = getFilteredQuestions();
+      state.statusFilter = prevStatusFilter;
+
+      const filtered = prevStatusFilter === "all"
+        ? baseFiltered
+        : baseFiltered.filter(q => {
+            const g = state.progress[q.id]?.grade || "";
+            if (prevStatusFilter === "unsolved") return !g;
+            return g === prevStatusFilter;
+          });
+
       const totalPages = Math.max(1, Math.ceil(filtered.length / state.pageSize));
       if (state.page > totalPages) state.page = totalPages;
 
       const startIdx = (state.page - 1) * state.pageSize;
       const slice = filtered.slice(startIdx, startIdx + state.pageSize);
 
-      const oCnt = filtered.filter(q => state.progress[q.id]?.grade === "O").length;
-      const dCnt = filtered.filter(q => state.progress[q.id]?.grade === "D").length;
-      const xCnt = filtered.filter(q => state.progress[q.id]?.grade === "X").length;
+      const oCnt = baseFiltered.filter(q => state.progress[q.id]?.grade === "O").length;
+      const dCnt = baseFiltered.filter(q => state.progress[q.id]?.grade === "D").length;
+      const xCnt = baseFiltered.filter(q => state.progress[q.id]?.grade === "X").length;
       const doneCnt = oCnt + dCnt + xCnt;
-      const rate = filtered.length > 0 ? Math.round((doneCnt / filtered.length) * 100) : 0;
+      const rate = baseFiltered.length > 0 ? Math.round((doneCnt / baseFiltered.length) * 100) : 0;
 
-      updateProgressBar(filtered.length, oCnt, dCnt, xCnt);
+      updateProgressBar(baseFiltered.length, oCnt, dCnt, xCnt);
 
       statsEl.innerHTML = `
-        <span class="stat-pill">표시: <strong>${filtered.length}</strong>문항</span>
+        <button type="button" class="stat-pill-btn ${state.statusFilter === "all" ? "active-filter" : ""}" data-sf="all">전체: <strong>${baseFiltered.length}</strong>문항</button>
         <span class="stat-pill">진도: <strong>${rate}%</strong></span>
-        <span class="stat-pill" style="color:var(--success);">외움(O): <strong>${oCnt}</strong></span>
-        <span class="stat-pill" style="color:var(--warn);">애매(△): <strong>${dCnt}</strong></span>
-        <span class="stat-pill" style="color:var(--danger);">모름(X): <strong>${xCnt}</strong></span>
+        <button type="button" class="stat-pill-btn ${state.statusFilter === "O" ? "active-filter" : ""}" data-sf="O" style="color:var(--success);">외움(O): <strong>${oCnt}</strong></button>
+        <button type="button" class="stat-pill-btn ${state.statusFilter === "D" ? "active-filter" : ""}" data-sf="D" style="color:var(--warn);">애매(△): <strong>${dCnt}</strong></button>
+        <button type="button" class="stat-pill-btn ${state.statusFilter === "X" ? "active-filter" : ""}" data-sf="X" style="color:var(--danger);">모름(X): <strong>${xCnt}</strong></button>
       `;
+      statsEl.querySelectorAll(".stat-pill-btn").forEach(pBtn => {
+        pBtn.addEventListener("click", () => {
+          const target = pBtn.dataset.sf;
+          state.statusFilter = (state.statusFilter === target && target !== "all") ? "all" : target;
+          const sfEl = document.getElementById("statusFilter");
+          if (sfEl) sfEl.value = state.statusFilter;
+          state.page = 1;
+          renderQuestions();
+        });
+      });
 
       if (slice.length === 0) {
         container.innerHTML = `<div class="panel empty-state">조건에 맞는 문항이 없습니다. 검색어나 필터를 초기화해 보세요.</div>`;
@@ -2877,21 +3033,34 @@
         let mainQuestionHtml = "";
         let optionsHtml = "";
 
-        if (topic.type === "mcq") {
+        const cardIsMcq = isQuestionMcqStyle(q, topic.type);
+        let mcqFeedbackHtml = "";
+        if (cardIsMcq) {
           const parsed = parseMcqOptions(q.question, q.options);
           mainQuestionHtml = `<div class="q-text">${escapeHtml(parsed.body)}</div>`;
           if (parsed.options.length >= 2) {
             const nums = ["①", "②", "③", "④", "⑤"];
+            const correctIdx = detectCorrectMcqIndex(parsed.options, q);
+            const hasPicked = typeof prog.selectedOption === "number" && prog.selectedOption >= 0;
             optionsHtml = `<div class="mcq-options">` + parsed.options.map((opt, oIdx) => {
               const isSelected = prog.selectedOption === oIdx;
-              const isCorrectHint = isOpen && isOptionCorrect(opt, oIdx, q);
+              const isCorrectHint = isOpen && (correctIdx >= 0 ? oIdx === correctIdx : isOptionCorrect(opt, oIdx, q, parsed.options));
+              const isWrongPick = isOpen && isSelected && !isCorrectHint;
               return `
-                <button type="button" class="mcq-opt-btn ${isSelected ? "selected" : ""} ${isCorrectHint ? "correct-highlight" : ""}" data-oidx="${oIdx}">
+                <button type="button" class="mcq-opt-btn ${isSelected ? "selected" : ""} ${isCorrectHint ? "correct-highlight" : ""} ${isWrongPick ? "wrong-highlight" : ""}" data-oidx="${oIdx}">
                   <span class="opt-num">${oIdx + 1}</span>
                   <span>${nums[oIdx] ? `<strong>${nums[oIdx]}</strong> ` : ""}${escapeHtml(opt)}</span>
                 </button>
               `;
             }).join("") + `</div>`;
+            if (hasPicked && isOpen) {
+              const pickedOk = correctIdx >= 0
+                ? prog.selectedOption === correctIdx
+                : isOptionCorrect(parsed.options[prog.selectedOption], prog.selectedOption, q, parsed.options);
+              mcqFeedbackHtml = pickedOk
+                ? `<div class="mcq-feedback ok">⭕ ${prog.selectedOption + 1}번 정답입니다!</div>`
+                : `<div class="mcq-feedback ng">❌ ${prog.selectedOption + 1}번 오답입니다.${correctIdx >= 0 ? ` (추정 정답: ${correctIdx + 1}번 · 아래 해설 확인)` : " (아래 해설을 확인하세요)"}</div>`;
+            }
           }
         } else if (topic.type === "work_prac" && (q.question || "").includes("[상황]")) {
           const parts = q.question.split("[상황]");
@@ -2908,7 +3077,7 @@
           : "";
 
         const memoHtml = state.showMemo
-          ? `<textarea class="my-answer-box" placeholder="내 답안 또는 암기 메모 작성..." data-qid="${escapeHtml(q.id)}">${escapeHtml(prog.memo || "")}</textarea>`
+          ? `<label class="answer-input-label">✏️ ${cardIsMcq ? "풀이 메모 / 오답 정리" : "내 답안 입력 (입력 후 아래 '해답 및 해설 보기'로 비교)"}</label><textarea class="my-answer-box" placeholder="${cardIsMcq ? "핵심 개념이나 오답 메모를 적어두세요..." : "여기에 내 답안을 직접 입력해 보세요..."}" data-qid="${escapeHtml(q.id)}">${escapeHtml(prog.memo || "")}</textarea>`
           : "";
 
         card.innerHTML = `
@@ -2926,6 +3095,7 @@
           </div>
           ${mainQuestionHtml}
           ${optionsHtml}
+          ${mcqFeedbackHtml}
           ${memoHtml}
           <div class="answer-panel ${isOpen ? "open" : ""}">
             <div class="answer-heading">✅ 모범답안 / 핵심정답</div>
@@ -2950,35 +3120,36 @@
         }
 
         card.querySelectorAll(".mcq-opt-btn").forEach(btn => {
-          btn.addEventListener("click", async () => {
+          btn.addEventListener("click", () => {
             const oIdx = Number(btn.dataset.oidx);
             const parsed = parseMcqOptions(q.question, q.options);
-            const correct = isOptionCorrect(parsed.options[oIdx], oIdx, q);
+            const correct = isOptionCorrect(parsed.options[oIdx], oIdx, q, parsed.options);
             const autoGrade = correct ? "O" : "X";
-            await saveProgress(q.id, { selectedOption: oIdx, revealed: true, grade: autoGrade });
             state.progress[q.id] = { ...(state.progress[q.id] || {}), selectedOption: oIdx, revealed: true, grade: autoGrade };
-            await rewardAction(correct, correct ? "객관식 정답!" : "오답 복습");
             renderQuestions();
+            saveProgress(q.id, { selectedOption: oIdx, revealed: true, grade: autoGrade });
+            rewardAction(correct, correct ? "객관식 정답!" : "오답 복습");
           });
         });
 
-        card.querySelector(".reveal-btn").addEventListener("click", async () => {
+        card.querySelector(".reveal-btn").addEventListener("click", () => {
           const nextRev = !isOpen;
-          await saveProgress(q.id, { revealed: nextRev });
           state.progress[q.id] = { ...(state.progress[q.id] || {}), revealed: nextRev };
           renderQuestions();
+          saveProgress(q.id, { revealed: nextRev });
         });
 
         card.querySelectorAll(".grade-btn").forEach(gBtn => {
-          gBtn.addEventListener("click", async () => {
+          gBtn.addEventListener("click", () => {
             const g = gBtn.dataset.grade;
-            const nextG = prog.grade === g ? "" : g;
-            await saveProgress(q.id, { grade: nextG });
+            const curG = state.progress[q.id]?.grade || "";
+            const nextG = curG === g ? "" : g;
             state.progress[q.id] = { ...(state.progress[q.id] || {}), grade: nextG };
-            if (nextG === "O") await rewardAction(true, "외움 체크");
-            else if (nextG === "D") await rewardAction("partial", "애매 체크");
-            else if (nextG === "X") await rewardAction(false, "모름 체크");
             renderQuestions();
+            saveProgress(q.id, { grade: nextG });
+            if (nextG === "O") rewardAction(true, "외움 체크");
+            else if (nextG === "D") rewardAction("partial", "애매 체크");
+            else if (nextG === "X") rewardAction(false, "모름 체크");
           });
         });
 
@@ -3330,7 +3501,7 @@
       let mainQHtml = "";
       let optsHtml = "";
       const qType = q._topicType || (topic && topic.type) || "subjective";
-      const isMcq = qType === "mcq";
+      const isMcq = isQuestionMcqStyle(q, qType);
 
       if (isMcq) {
         const parsed = parseMcqOptions(q.question, q.options);
@@ -3374,6 +3545,10 @@
           </div>
           ${mainQHtml}
           ${optsHtml}
+          ${!isMcq ? `
+            <label class="answer-input-label" for="challengeAnswerInput">✏️ 내 답안 입력</label>
+            <textarea class="my-answer-box" id="challengeAnswerInput" placeholder="여기에 내 답안을 먼저 적어본 뒤 아래 '정답 확인하기'를 눌러 비교해 보세요...">${escapeHtml(ch.userInputCurrent || "")}</textarea>
+          ` : ""}
           <div class="answer-panel ${showAns ? "open" : ""}">
             <div class="answer-heading">✅ 모범답안 / 핵심정답</div>
             <div>${escapeHtml(q.answer || "별도 모범답안 없음 (해설 참조)")}</div>
@@ -3382,6 +3557,13 @@
           <div class="card-footer" id="challengeActionFooter"></div>
         </article>
       `;
+
+      const chInputEl = box.querySelector("#challengeAnswerInput");
+      if (chInputEl) {
+        chInputEl.addEventListener("input", (e) => {
+          ch.userInputCurrent = e.target.value;
+        });
+      }
 
       // 객관식 선택 이벤트
       box.querySelectorAll(".mcq-opt-btn").forEach(btn => {
@@ -3423,6 +3605,7 @@
           ch.answeredCurrent = false;
           ch.selectedMcqIdx = -1;
           ch.revealedCurrent = false;
+      ch.userInputCurrent = "";
           renderChallengeQuestion();
         });
       }
